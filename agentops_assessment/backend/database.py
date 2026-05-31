@@ -144,6 +144,8 @@ def insert_run_event(
     payload: dict[str, Any],
     tool_name: str | None = None,
 ) -> None:
+    from agentops_assessment.security.redaction import redact
+
     conn.execute(
         """
         INSERT INTO run_events (run_id, seq, type, tool_name, payload_json, created_at)
@@ -154,7 +156,7 @@ def insert_run_event(
             next_event_seq(conn, run_id),
             event_type,
             tool_name,
-            encode_json(payload),
+            encode_json(redact(payload)),
             now_iso(),
         ),
     )
@@ -169,12 +171,13 @@ def insert_audit_log(
     payload: dict[str, Any],
     decision: str = "allow",
 ) -> None:
+    from agentops_assessment.security.redaction import redact
+
     conn.execute(
         """
         INSERT INTO audit_logs (actor_id, action, resource, decision, payload_json, created_at)
         VALUES (?, ?, ?, ?, ?, ?)
         """,
-        (actor_id, action, resource, decision, encode_json(payload), now_iso()),
+        (actor_id, action, resource, decision, encode_json(redact(payload)), now_iso()),
     )
     conn.commit()
-

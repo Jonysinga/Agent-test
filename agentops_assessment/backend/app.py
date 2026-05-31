@@ -30,6 +30,20 @@ def _run_from_row(row) -> RunOut:
     return RunOut(**data)
 
 
+def _can_view_run(user: dict, run: dict, task: dict) -> bool:
+    """请求人是 run 请求者、任务创建者或管理员均可查看。"""
+    return (
+        user["id"] == run["requested_by"]
+        or user["id"] == task.get("created_by")
+        or "admin:read" in user["permissions"]
+    )
+
+
+def _can_run_task(user: dict, task: dict) -> bool:
+    """任务创建者或管理员可触发任务运行，避免跨用户借 run 读取他人任务结果。"""
+    return user["id"] == task.get("created_by") or "admin:read" in user["permissions"]
+
+
 def create_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -52,7 +66,29 @@ def create_app() -> FastAPI:
         body: TaskCreate,
         user: dict = Depends(require_permissions("tasks:create")),
     ) -> TaskOut:
-        # TODO(candidate/P1): 增加提示词注入检查，并记录拒绝类审计日志。
+        # 提示词注入检测：title + prompt 联合检查
+        from agentops_assessment.rag.security import detect_prompt_injection
+        combined = f"{body.title} {body.prompt}"
+        hits = detect_prompt_injection(combined)
+        if hits:
+            with database.connect() as conn:
+                database.init_db(conn)
+                database.insert_audit_log(
+                    conn,
+                    actor_id=user["id"],
+                    action="task.rejected",
+                    resource="task",
+                    payload={"reason": "prompt_injection_detected", "patterns_hit": hits},
+                    decision="deny",
+                )
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "prompt_injection_detected",
+                    "message": "任务内容包含疑似提示词注入，已拒绝。",
+                },
+            )
+
         task_id = str(uuid.uuid4())
         now = database.now_iso()
         with database.connect() as conn:
@@ -84,7 +120,6 @@ def create_app() -> FastAPI:
         background_tasks: BackgroundTasks,
         user: dict = Depends(require_permissions("tasks:run")),
     ) -> RunCreateOut:
-        # TODO(candidate/P1): 创建运行前校验工具级权限。
         run_id = str(uuid.uuid4())
         now = database.now_iso()
         with database.connect() as conn:
@@ -92,6 +127,20 @@ def create_app() -> FastAPI:
             task = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
             if not task:
                 raise HTTPException(status_code=404, detail="任务不存在。")
+            task_data = dict(task)
+            if not _can_run_task(user, task_data):
+                database.insert_audit_log(
+                    conn,
+                    actor_id=user["id"],
+                    action="permission.denied",
+                    resource=task_id,
+                    payload={
+                        "reason": "task_run_visibility",
+                        "required": ["task_owner", "admin:read"],
+                    },
+                    decision="deny",
+                )
+                raise HTTPException(status_code=403, detail="无权限运行该任务。")
             conn.execute(
                 """
                 INSERT INTO runs (id, task_id, requested_by, status, created_at)
@@ -120,7 +169,13 @@ def create_app() -> FastAPI:
             row = conn.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone()
             if not row:
                 raise HTTPException(status_code=404, detail="运行记录不存在。")
-            # TODO(candidate/P1): 校验所有者或管理员可见性。
+            run = dict(row)
+            task_row = conn.execute(
+                "SELECT * FROM tasks WHERE id = ?", (run["task_id"],)
+            ).fetchone()
+            task = dict(task_row) if task_row else {}
+            if not _can_view_run(user, run, task):
+                raise HTTPException(status_code=403, detail="无权限查看该运行记录。")
             database.insert_audit_log(
                 conn,
                 actor_id=user["id"],
@@ -134,8 +189,17 @@ def create_app() -> FastAPI:
     def get_run_events(run_id: str, user: dict = Depends(get_current_user)) -> dict[str, Any]:
         with database.connect() as conn:
             database.init_db(conn)
-            # TODO(candidate/P1): 先校验 run 是否存在；不存在应返回 404。
-            # 事件可见性必须与 get_run 一致：仅请求人、任务创建人或管理员可读。
+            # 先检查 run 存在性，再校验可见性（顺序不能颠倒：先 404 再 403）
+            row = conn.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="运行记录不存在。")
+            run = dict(row)
+            task_row = conn.execute(
+                "SELECT * FROM tasks WHERE id = ?", (run["task_id"],)
+            ).fetchone()
+            task = dict(task_row) if task_row else {}
+            if not _can_view_run(user, run, task):
+                raise HTTPException(status_code=403, detail="无权限查看该运行事件。")
             rows = conn.execute(
                 """
                 SELECT seq, type, tool_name, payload_json, created_at

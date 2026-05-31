@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import Depends, Header, HTTPException, status
+from fastapi import Depends, Header, HTTPException, Request, status
 
 from agentops_assessment.backend import database
 
@@ -39,11 +39,30 @@ def get_current_user(x_user_id: Annotated[str | None, Header()] = None) -> dict:
 
 
 def require_permissions(*permissions: str):
-    def dependency(user: dict = Depends(get_current_user)) -> dict:
+    """权限检查依赖。缺少权限时写 deny 审计日志后返回 403。
+
+    审计 payload 含 missing_permissions 和 required，方便管理员追溯。
+    """
+    def dependency(
+        request: Request,
+        user: dict = Depends(get_current_user),
+    ) -> dict:
         missing = [p for p in permissions if p not in user["permissions"]]
         if missing:
-            # TODO(candidate/P1): 权限拒绝也要写入审计日志，尤其是 mallory 创建任务
-            # 这类入口拒绝；日志载荷只能包含脱敏后的 actor、缺失权限和资源线索。
+            resource_hint = f"{request.method} {request.url.path}"
+            with database.connect() as conn:
+                database.init_db(conn)
+                database.insert_audit_log(
+                    conn,
+                    actor_id=user["id"],
+                    action="permission.denied",
+                    resource=resource_hint,
+                    payload={
+                        "missing_permissions": missing,
+                        "required": list(permissions),
+                    },
+                    decision="deny",
+                )
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail={"missing_permissions": missing},

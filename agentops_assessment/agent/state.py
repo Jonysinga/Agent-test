@@ -19,6 +19,7 @@ class RunState:
     status: str = "pending"
     steps: list[StepState] = field(default_factory=list)
     result: dict[str, Any] | None = None
+    token_cost: int = 0  # FakeLLM 每步 completion_tokens=24，由 Executor 累加
 
 
 class InMemoryRunStateStore:
@@ -30,4 +31,3 @@ class InMemoryRunStateStore:
 
     def get(self, run_id: str) -> RunState | None:
         return self._states.get(run_id)
-

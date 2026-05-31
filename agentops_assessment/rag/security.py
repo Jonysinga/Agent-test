@@ -13,8 +13,5 @@ PROMPT_INJECTION_PATTERNS = [
 
 
 def detect_prompt_injection(text: str) -> list[str]:
-    """返回命中的提示词注入模式。
-
-    TODO(candidate/P1): 将该防护接入任务创建和工具执行路径。
-    """
+    """返回命中的提示词注入模式。调用方在任务创建和 RAG 输出路径接线。"""
     return [pattern.pattern for pattern in PROMPT_INJECTION_PATTERNS if pattern.search(text)]

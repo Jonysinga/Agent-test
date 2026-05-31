@@ -26,10 +26,13 @@ class ToolRegistry:
     @classmethod
     def with_default_clients(
         cls,
-        fixtures_dir: str | Path = "fixtures",
+        fixtures_dir: str | Path | None = None,
         retry_attempts: int = 1,
         supplier_fail_first: bool = False,
     ) -> "ToolRegistry":
+        import os
+        if fixtures_dir is None:
+            fixtures_dir = os.getenv("ASSESSMENT_FIXTURES_DIR", "fixtures")
         registry = cls(retry_attempts=retry_attempts)
         fixtures = Path(fixtures_dir)
         erp = ERPClient(fixtures / "business" / "erp_inventory.json")
@@ -67,9 +70,10 @@ class ToolRegistry:
             self.last_call_attempts[name] = attempts
             try:
                 result = self._tools[name](args)
-                # TODO(candidate/P1): 规范化工具输出，并对敏感字段做脱敏；
-                # vendor_secret、unit_cost_usd 等不得进入 result/events/audit。
-                return result
+                # 源头脱敏：敏感字段（vendor_secret / unit_cost_usd 等）不得进入
+                # result/events/audit。Executor 出口处还有二次 redact 兜底。
+                from agentops_assessment.security.redaction import redact
+                return redact(result)
             except TransientIntegrationError as exc:
                 last_error = exc
                 continue
